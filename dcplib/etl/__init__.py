@@ -175,28 +175,38 @@ class DSSExtractor:
         fetched_files, fetch_file_errors = [], []
         # For each file in the bundle, check if it has been fetched, validate the checksum, and link it in the bundle
         # directory. Otherwise, call get_file() to fetch it.
-        for f in bundle_manifest["files"]:
-            if self._should_fetch_file(f):
-                os.makedirs(f"{self.sd}/bundles/{bundle_uuid}.{bundle_version}", exist_ok=True)
-                os.makedirs(f"{self.sd}/files/{bundle_uuid}.{bundle_version}", exist_ok=True)
-                try:
-                    with open(f"{self.sd}/files/{f['uuid']}.{f['version']}", "rb") as fh:
-                        file_csum = hashlib.sha256(fh.read()).hexdigest()
-                        if file_csum == f["sha256"]:
-                            self._link_file(bundle_uuid, bundle_version, f)
-                            continue
-                except (FileNotFoundError,):
-                    try:
-                        self.get_file(f, bundle_uuid, bundle_version)
-                        fetched_files.append(f)
-                    except Exception as e:
-                        logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
-                        fetch_file_errors.append(e)
-            else:
-                logger.debug("Skipping file %s/%s (no filter match)", bundle_uuid, f["name"])
-            for e in fetch_file_errors:
-                raise e
+        executor = concurrent.futures.ThreadPoolExecutor(64)
+        future_to_file = {executor.submit(self.download_or_link_file, bundle_uuid, bundle_version, f)
+                          for f in bundle_manifest["files"] if self._should_fetch_file(f)}
+        for future in concurrent.futures.as_completed(future_to_file):
+            result = future.result()
+
+            if result.get("fetched"):
+                fetched_files.append(result["fetched"])
+            elif result.get("error"):
+                fetch_file_errors.append(result["error"])
+
+        for e in fetch_file_errors:
+            raise e
+
         return bundle_uuid, bundle_version, fetched_files
+
+    def download_or_link_file(self, bundle_uuid, bundle_version, f):
+        os.makedirs(f"{self.sd}/bundles/{bundle_uuid}.{bundle_version}", exist_ok=True)
+        os.makedirs(f"{self.sd}/files/{bundle_uuid}.{bundle_version}", exist_ok=True)
+        try:
+            with open(f"{self.sd}/files/{f['uuid']}.{f['version']}", "rb") as fh:
+                file_csum = hashlib.sha256(fh.read()).hexdigest()
+                if file_csum == f["sha256"]:
+                    self._link_file(bundle_uuid, bundle_version, f)
+                    return {"linked": f}
+        except (FileNotFoundError,):
+            try:
+                self.get_file(f, bundle_uuid, bundle_version)
+                return {"fetched": f}
+            except Exception as e:
+                logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
+                return {"error": e}
 
     def _should_fetch_file(self, f):
         if any(fnmatchcase(f["content-type"], p) for p in self.content_type_patterns):
