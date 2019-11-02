@@ -175,7 +175,7 @@ class DSSExtractor:
         fetched_files, fetch_file_errors = [], []
         # For each file in the bundle, check if it has been fetched, validate the checksum, and link it in the bundle
         # directory. Otherwise, call get_file() to fetch it.
-        executor = concurrent.futures.ThreadPoolExecutor(64)
+        executor = concurrent.futures.ThreadPoolExecutor(96)
         future_to_file = {executor.submit(self.download_or_link_file, bundle_uuid, bundle_version, f)
                           for f in bundle_manifest["files"] if self._should_fetch_file(f)}
         for future in concurrent.futures.as_completed(future_to_file):
@@ -195,11 +195,19 @@ class DSSExtractor:
         os.makedirs(f"{self.sd}/bundles/{bundle_uuid}.{bundle_version}", exist_ok=True)
         os.makedirs(f"{self.sd}/files/{bundle_uuid}.{bundle_version}", exist_ok=True)
         try:
-            with open(f"{self.sd}/files/{f['uuid']}.{f['version']}", "rb") as fh:
-                file_csum = hashlib.sha256(fh.read()).hexdigest()
-                if file_csum == f["sha256"]:
-                    self._link_file(bundle_uuid, bundle_version, f)
-                    return {"linked": f}
+            attempts = 0
+            while True:
+                with open(f"{self.sd}/files/{f['uuid']}.{f['version']}", "rb") as fh:
+                    file_csum = hashlib.sha256(fh.read()).hexdigest()
+                    if file_csum == f["sha256"]:
+                        self._link_file(bundle_uuid, bundle_version, f)
+                        return {"linked": f}
+                    else:
+                        if attempts > 5:
+                            return {"error": Exception(f"File contents do not match {f['uuid']}.{f['version']}")}
+                        attempts += 1
+                        time.sleep(5)
+
         except (FileNotFoundError,):
             try:
                 self.get_file(f, bundle_uuid, bundle_version)
@@ -207,6 +215,9 @@ class DSSExtractor:
             except Exception as e:
                 logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
                 return {"error": e}
+        except Exception as e:
+            logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
+            return {"error": e}
 
     def _should_fetch_file(self, f):
         if any(fnmatchcase(f["content-type"], p) for p in self.content_type_patterns):
