@@ -19,6 +19,7 @@ Example usage:
 
 import os, sys, json, concurrent.futures, hashlib, logging, threading, time, traceback, itertools
 from fnmatch import fnmatchcase
+import requests.exceptions
 
 import hca
 from ..networking import HTTPRequest
@@ -206,15 +207,19 @@ class DSSExtractor:
                         if attempts > 5:
                             return {"error": Exception(f"File contents do not match {f['uuid']}.{f['version']}")}
                         attempts += 1
-                        time.sleep(5)
+                        time.sleep(10)
 
         except (FileNotFoundError,):
-            try:
-                self.get_file(f, bundle_uuid, bundle_version)
-                return {"fetched": f}
-            except Exception as e:
-                logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
-                return {"error": e}
+            while True:
+                try:
+                    self.get_file(f, bundle_uuid, bundle_version)
+                    return {"fetched": f}
+                except (requests.exceptions.ConnectionError,):
+                    time.sleep(10)
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
+                    return {"error": e}
         except Exception as e:
             logger.debug(f"Error while fetching file {f['uuid']}.{f['version']}: %s", e)
             return {"error": e}
